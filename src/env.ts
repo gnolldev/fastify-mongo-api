@@ -21,18 +21,21 @@ const Env = z.object({
   SMTP_SECURE: z.string().transform((v) => v.toLowerCase() === "true"),
   SMTP_USER: z.string().min(1),
   SMTP_PASS: z.string().min(1),
+  SMTP_FROM: z.string().min(1, "SMTP_FROM is required"),
 
   // Security & auth config
   BCRYPT_COST: z.coerce.number().int().min(10).max(14).default(12),
   JWT_SECRET: z.string().min(32, "JWT_SECRET must be at least 32 characters"),
   ACCESS_TOKEN_TTL: z.string().default('15m'),
   REFRESH_TOKEN_TTL: z.string().default('7d'),
+  EMAIL_VERIFICATION_TOKEN_TTL: z.string().default("10m"),
   
   // Frontend & CORS config
   COOKIE_SECURE: z
     .string()
     .default("false")
     .transform((v) => v.toLowerCase() === "true"), // Convert string to boolean
+  COOKIE_SAMESITE: z.enum(["strict", "lax", "none"]).default("lax"),
   CORS_ORIGIN: z.string().min(1, "CORS_ORIGIN is required"),
 });
 

@@ -28,6 +28,11 @@ if (typeof ACCESS_TTL_MS !== "number") {
 }
 const ACCESS_TTL_S = Math.floor(ACCESS_TTL_MS / 1000);
 
+const VERIFICATION_TTL_MS = ms(env.EMAIL_VERIFICATION_TOKEN_TTL as StringValue);
+if (typeof VERIFICATION_TTL_MS !== "number") {
+  throw new Error(`Invalid EMAIL_VERIFICATION_TOKEN_TTL: ${env.EMAIL_VERIFICATION_TOKEN_TTL}`);
+}
+
 // --- Zod Validation Schema ---
 // Define a reusable schema for user authentication input.
 const authBodySchema = z.object({
@@ -38,9 +43,10 @@ const authBodySchema = z.object({
 // Infer a TypeScript type from the schema for type safety.
 type AuthBody = z.infer<typeof authBodySchema>;
 
-// New schema to validate the incoming email verification token.
+// New schema for validating the incoming email verification code.
 const verifyEmailSchema = z.object({
-  token: z.string().min(1, "Verification token is required"),
+  email: z.string().email("A valid email is required"),
+  code: z.string().length(6, "Verification code must be 6 digits"),
 });
 type VerifyEmailBody = z.infer<typeof verifyEmailSchema>;
 
@@ -78,44 +84,41 @@ export default async function authRoutes(app: FastifyInstance) {
       const passwordHash = await bcrypt.hash(password, env.BCRYPT_COST);
 
       try {
-        // --- Email Verification Token Generation ---
-        // Create a random, unguessable token for the user to verify their email.
-        const verificationToken = crypto.randomBytes(32).toString("hex");
-        // Hash the token before saving it to the database for security.
-        const hashedToken = crypto
+        // --- Email Verification Code Generation ---
+        // Create a random, 6-digit code for the user to verify their email.
+        const verificationCode = Math.floor(100000 + Math.random() * 900000).toString();
+        // Hash the code before saving it to the database for security.
+        const hashedCode = crypto
           .createHash("sha256")
-          .update(verificationToken)
+          .update(verificationCode)
           .digest("hex");
 
-        // Set an expiration date for the token (e.g., 10 minutes).
-        const tokenExpires = new Date(Date.now() + 10 * 60 * 1000);
+        // Set an expiration date for the token.
+        const tokenExpires = new Date(Date.now() + VERIFICATION_TTL_MS);
 
         await UserModel.create({
           email,
           passwordHash,
           role: "user",
           emailVerifiedAt: null,
-          emailVerificationToken: hashedToken,
+          emailVerificationToken: hashedCode,
           emailVerificationExpires: tokenExpires,
         });
 
         // --- Send Verification Email ---
-        // Construct the full verification URL to be included in the email.
-        const verificationUrl = `${env.FRONTEND_URL}/verify-email?token=${verificationToken}`;
-        
-        // Log the URL in development for easy testing.
-        app.log.info(`Verification URL for ${email}: ${verificationUrl}`);
+        // Log the code in development for easy testing.
+        app.log.info(`Verification code for ${email}: ${verificationCode}`);
 
         // Send the verification email to the user's address.
         await sendEmail({
           to: email,
-          subject: "Verify Your Email Address",
-          html: `<p>Please click the link to verify your email: <a href="${verificationUrl}">${verificationUrl}</a></p>`,
+          subject: "Your Verification Code",
+          html: `<p>Your verification code is: <strong>${verificationCode}</strong></p><p>This code will expire in ${env.EMAIL_VERIFICATION_TOKEN_TTL}.</p>`,
         });
 
         return reply
           .code(201)
-          .send({ message: "Verification email sent. Please check your inbox." });
+          .send({ message: "Verification code sent. Please check your inbox." });
       } catch (err: any) {
         // Handle duplicate email error.
         if (err?.code === 11000) {
@@ -128,23 +131,24 @@ export default async function authRoutes(app: FastifyInstance) {
   );
 
   // --- Verify Email (NEW) ---
-  // This new route handles the token sent from the frontend after the user clicks the email link.
+  // This new route handles the code sent from the frontend after the user receives the email.
   app.post<{ Body: VerifyEmailBody }>(
     "/verify-email",
     { schema: { body: verifyEmailSchema } },
     async (request, reply) => {
-      const { token } = request.body;
-      // Hash the incoming token to match the one stored in the database.
-      const hashedToken = crypto.createHash("sha256").update(token).digest("hex");
+      const { email, code } = request.body;
+      // Hash the incoming code to match the one stored in the database.
+      const hashedCode = crypto.createHash("sha256").update(code).digest("hex");
 
-      // Find user by the hashed token, ensuring it has not expired.
+      // Find user by email, ensuring the verification code matches and has not expired.
       const user = await UserModel.findOne({
-        emailVerificationToken: hashedToken,
+        email,
+        emailVerificationToken: hashedCode,
         emailVerificationExpires: { $gt: new Date() },
       });
 
       if (!user) {
-        return reply.code(400).send({ error: "Invalid or expired verification token." });
+        return reply.code(400).send({ error: "Invalid or expired verification code." });
       }
 
       // Mark user as verified and clear verification fields for security.
@@ -167,8 +171,8 @@ export default async function authRoutes(app: FastifyInstance) {
       });
 
       // Set the authentication cookies in the browser.
-      reply.setCookie("refresh_token", refreshToken, { path: "/", httpOnly: true, secure: process.env.NODE_ENV === "production", sameSite: "strict", maxAge: REFRESH_TTL_S });
-      reply.setCookie("access_token", accessToken, { path: "/", httpOnly: true, secure: process.env.NODE_ENV === "production", sameSite: "strict", maxAge: ACCESS_TTL_S });
+      reply.setCookie("refresh_token", refreshToken, { path: "/", httpOnly: true, secure: env.COOKIE_SECURE, sameSite: env.COOKIE_SAMESITE, maxAge: REFRESH_TTL_S });
+      reply.setCookie("access_token", accessToken, { path: "/", httpOnly: true, secure: env.COOKIE_SECURE, sameSite: env.COOKIE_SAMESITE, maxAge: ACCESS_TTL_S });
 
       return reply.send({ message: "Email verified successfully. You are now logged in." });
     }
@@ -224,8 +228,8 @@ export default async function authRoutes(app: FastifyInstance) {
       });
 
       // --- Set Secure Cookies ---
-      reply.setCookie("refresh_token", refreshToken, { path: "/", httpOnly: true, secure: process.env.NODE_ENV === "production", sameSite: "strict", maxAge: REFRESH_TTL_S });
-      reply.setCookie("access_token", accessToken, { path: "/", httpOnly: true, secure: process.env.NODE_ENV === "production", sameSite: "strict", maxAge: ACCESS_TTL_S });
+      reply.setCookie("refresh_token", refreshToken, { path: "/", httpOnly: true, secure: env.COOKIE_SECURE, sameSite: env.COOKIE_SAMESITE, maxAge: REFRESH_TTL_S });
+      reply.setCookie("access_token", accessToken, { path: "/", httpOnly: true, secure: env.COOKIE_SECURE, sameSite: env.COOKIE_SAMESITE, maxAge: ACCESS_TTL_S });
 
       // Return non-sensitive user data.
       return reply.send({
@@ -276,8 +280,8 @@ export default async function authRoutes(app: FastifyInstance) {
       const accessToken = app.jwt.sign({ sub: String(user._id), role: user.role, email: user.email }, { expiresIn: env.ACCESS_TOKEN_TTL });
       
       // Set the new tokens in cookies.
-      reply.setCookie("refresh_token", newRefreshToken, { path: "/", httpOnly: true, secure: process.env.NODE_ENV === "production", sameSite: "strict", maxAge: REFRESH_TTL_S });
-      reply.setCookie("access_token", accessToken, { path: "/", httpOnly: true, secure: process.env.NODE_ENV === "production", sameSite: "strict", maxAge: ACCESS_TTL_S });
+      reply.setCookie("refresh_token", newRefreshToken, { path: "/", httpOnly: true, secure: env.COOKIE_SECURE, sameSite: env.COOKIE_SAMESITE, maxAge: REFRESH_TTL_S });
+      reply.setCookie("access_token", accessToken, { path: "/", httpOnly: true, secure: env.COOKIE_SECURE, sameSite: env.COOKIE_SAMESITE, maxAge: ACCESS_TTL_S });
 
       return reply.send({ accessToken });
     } catch (err) {
@@ -294,8 +298,8 @@ export default async function authRoutes(app: FastifyInstance) {
     }
 
     // Clear authentication cookies from the browser.
-    reply.clearCookie("refresh_token", { path: "/", httpOnly: true, secure: process.env.NODE_ENV === "production", sameSite: "strict" });
-    reply.clearCookie("access_token", { path: "/", httpOnly: true, secure: process.env.NODE_ENV === "production", sameSite: "strict" });
+    reply.clearCookie("refresh_token", { path: "/", httpOnly: true, secure: env.COOKIE_SECURE, sameSite: env.COOKIE_SAMESITE });
+    reply.clearCookie("access_token", { path: "/", httpOnly: true, secure: env.COOKIE_SECURE, sameSite: env.COOKIE_SAMESITE });
 
     return reply.send({ success: true });
   });
