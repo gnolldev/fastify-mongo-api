@@ -25,15 +25,10 @@ interface SendEmailOptions {
  * @param {SendEmailOptions} options - The email options.
  */
 export async function sendEmail({ to, subject, html }: SendEmailOptions) {
-  try {
-    await transporter.sendMail({
-      from: '"Vellum Rift" <noreply@vellumrift.com>', // Replace with your "from" email
-      to,
-      subject,
-      html,
-    });
-  } catch (error) {
-    console.error("Error sending email:", error);
-    // In a real app, you'd want more robust error handling here.
-  }
+  await transporter.sendMail({
+    from: env.SMTP_FROM,
+    to,
+    subject,
+    html,
+  });
 }
